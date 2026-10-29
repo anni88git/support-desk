@@ -1,13 +1,13 @@
 import { Router } from 'express';
-import { getDb } from '../db/db.js';
+import { getPool } from '../db/db.js';
 
 const router = Router();
 
-router.get('/', (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
-    const db = req.app.locals.db || getDb();
-    const agents = db.prepare('SELECT id, name, email FROM agents ORDER BY name ASC').all();
-    res.json(agents);
+    const db = req.app.locals.db || getPool();
+    const result = await db.query('SELECT id, name, email FROM agents ORDER BY name ASC');
+    res.json(result.rows);
   } catch (err) {
     next(err);
   }

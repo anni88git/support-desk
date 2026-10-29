@@ -1,28 +1,21 @@
-import { getDb } from './db.js';
+import { getPool, withTransaction } from './db.js';
 
-export function seed(db) {
-  const existingTickets = db.prepare('SELECT COUNT(*) as count FROM tickets').get();
-  if (existingTickets.count > 0) {
+export async function seed(db = getPool()) {
+  const existingTickets = await db.query('SELECT COUNT(*) as count FROM tickets');
+  const count = parseInt(existingTickets.rows[0].count, 10);
+  if (count > 0) {
     console.log('[Seed] Tickets table already populated. Skipping seed.');
     return;
   }
 
   console.log('[Seed] Seeding agents and tickets...');
 
-  const insertAgent = db.prepare('INSERT OR IGNORE INTO agents (id, name, email) VALUES (?, ?, ?)');
   const agents = [
     [1, 'Alice Walker', 'alice@supportdesk.local'],
     [2, 'Bob Smith', 'bob@supportdesk.local'],
     [3, 'Charlie Kim', 'charlie@supportdesk.local'],
     [4, 'Diana Prince', 'diana@supportdesk.local']
   ];
-
-  const insertAgentsTx = db.transaction(() => {
-    for (const [id, name, email] of agents) {
-      insertAgent.run(id, name, email);
-    }
-  });
-  insertAgentsTx();
 
   const now = Date.now();
   const hoursAgo = (h) => new Date(now - h * 60 * 60 * 1000).toISOString();
@@ -35,7 +28,7 @@ export function seed(db) {
       description: 'Subscriptions are failing to renew since yesterday morning with webhook timeouts.',
       priority: 'Urgent',
       status: 'Open',
-      assignee_id: 1, // Alice Walker
+      assignee_id: 1,
       created_at: hoursAgo(30), // Overdue (>24h)
       updated_at: hoursAgo(30),
       resolved_at: null
@@ -47,7 +40,7 @@ export function seed(db) {
       description: 'Customers on iOS 18 experience an unhandled JavaScript exception during Apple Pay tokenization.',
       priority: 'High',
       status: 'In Progress',
-      assignee_id: 2, // Bob Smith
+      assignee_id: 2,
       created_at: hoursAgo(48), // Overdue (>24h)
       updated_at: hoursAgo(10),
       resolved_at: null
@@ -59,7 +52,7 @@ export function seed(db) {
       description: 'Identity Provider returns InvalidAssertionSignature after our annual Okta cert rotation.',
       priority: 'Medium',
       status: 'Waiting on Customer',
-      assignee_id: 3, // Charlie Kim
+      assignee_id: 3,
       created_at: hoursAgo(36), // Overdue (>24h)
       updated_at: hoursAgo(6),
       resolved_at: null
@@ -68,10 +61,10 @@ export function seed(db) {
       id: 4,
       subject: 'Custom domain SSL renewal failed for app.client.com',
       customer: 'DevOps Lead (devops@client.com)',
-      description: 'Let\'s Encrypt challenge failed due to CAA record blocking issuance.',
+      description: "Let's Encrypt challenge failed due to CAA record blocking issuance.",
       priority: 'High',
       status: 'Resolved',
-      assignee_id: 4, // Diana Prince
+      assignee_id: 4,
       created_at: hoursAgo(72), // Created >24h ago but Resolved -> NOT overdue
       updated_at: hoursAgo(8),
       resolved_at: hoursAgo(8)
@@ -83,7 +76,7 @@ export function seed(db) {
       description: 'PgBouncer connection limits reached 98% utilization during marketing flash campaign.',
       priority: 'Urgent',
       status: 'In Progress',
-      assignee_id: 1, // Alice Walker
+      assignee_id: 1,
       created_at: hoursAgo(2), // <24h -> Not overdue
       updated_at: hoursAgo(1),
       resolved_at: null
@@ -95,7 +88,7 @@ export function seed(db) {
       description: 'The VAT identification string is misspelled as "VTA ID" on page 2 footer.',
       priority: 'Low',
       status: 'Open',
-      assignee_id: null, // Unassigned
+      assignee_id: null,
       created_at: hoursAgo(5),
       updated_at: hoursAgo(5),
       resolved_at: null
@@ -107,7 +100,7 @@ export function seed(db) {
       description: 'Receiving idempotency-key collisions when our endpoint responds with HTTP 504 gateway timeout.',
       priority: 'Medium',
       status: 'Open',
-      assignee_id: 3, // Charlie Kim
+      assignee_id: 3,
       created_at: hoursAgo(3),
       updated_at: hoursAgo(3),
       resolved_at: null
@@ -119,7 +112,7 @@ export function seed(db) {
       description: 'Customer names containing Kanji are replaced with question marks in generated CSV reports.',
       priority: 'High',
       status: 'In Progress',
-      assignee_id: 2, // Bob Smith
+      assignee_id: 2,
       created_at: hoursAgo(12),
       updated_at: hoursAgo(7),
       resolved_at: null
@@ -131,7 +124,7 @@ export function seed(db) {
       description: 'Users with UK (+44) numbers report OTP messages arriving 15 minutes after request.',
       priority: 'Medium',
       status: 'Waiting on Customer',
-      assignee_id: null, // Unassigned
+      assignee_id: null,
       created_at: hoursAgo(4),
       updated_at: hoursAgo(2),
       resolved_at: null
@@ -143,7 +136,7 @@ export function seed(db) {
       description: 'Timestamp text color has insufficient WCAG AA contrast ratio against dark backgrounds.',
       priority: 'Low',
       status: 'Resolved',
-      assignee_id: 4, // Diana Prince
+      assignee_id: 4,
       created_at: hoursAgo(50),
       updated_at: hoursAgo(20),
       resolved_at: hoursAgo(20)
@@ -155,8 +148,8 @@ export function seed(db) {
       description: 'API returns HTTP 429 even though request volume is within contracted tier quota.',
       priority: 'Urgent',
       status: 'Open',
-      assignee_id: null, // Unassigned & Overdue!
-      created_at: hoursAgo(40), // Overdue (>24h)
+      assignee_id: null, // Overdue (>24h)
+      created_at: hoursAgo(40),
       updated_at: hoursAgo(40),
       resolved_at: null
     },
@@ -167,148 +160,125 @@ export function seed(db) {
       description: 'Developers need HMAC-SHA256 verification code snippets in Python and Node.js.',
       priority: 'Low',
       status: 'Open',
-      assignee_id: 1, // Alice Walker
+      assignee_id: 1,
       created_at: hoursAgo(18),
       updated_at: hoursAgo(18),
       resolved_at: null
     }
   ];
 
-  const insertTicket = db.prepare(`
-    INSERT INTO tickets (id, subject, customer, description, priority, status, assignee_id, created_at, updated_at, resolved_at)
-    VALUES (@id, @subject, @customer, @description, @priority, @status, @assignee_id, @created_at, @updated_at, @resolved_at)
-  `);
-
-  const insertEntry = db.prepare(`
-    INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
-    VALUES (@ticket_id, @type, @content, @author_id, @created_at)
-  `);
-
-  const insertEvent = db.prepare(`
-    INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
-    VALUES (@ticket_id, @type, @old_value, @new_value, @actor_id, @created_at)
-  `);
-
-  const seedAllTx = db.transaction(() => {
-    for (const t of tickets) {
-      insertTicket.run(t);
-
-      // Initial created event for every ticket
-      insertEvent.run({
-        ticket_id: t.id,
-        type: 'created',
-        old_value: null,
-        new_value: `Created ticket #${t.id} with priority ${t.priority}`,
-        actor_id: t.assignee_id || 1,
-        created_at: t.created_at
-      });
+  await withTransaction(db, async (client) => {
+    // 1. Insert agents
+    for (const [id, name, email] of agents) {
+      await client.query(
+        `INSERT INTO agents (id, name, email) VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, email = EXCLUDED.email`,
+        [id, name, email]
+      );
     }
 
-    // Ticket 2: entries and events
-    insertEvent.run({
-      ticket_id: 2,
-      type: 'status_changed',
-      old_value: 'Open',
-      new_value: 'In Progress',
-      actor_id: 2,
-      created_at: hoursAgo(24)
-    });
-    insertEntry.run({
-      ticket_id: 2,
-      type: 'note',
-      content: 'Customer is an Enterprise Tier client with 50k DAU. Escalated to mobile core team.',
-      author_id: 1, // Alice
-      created_at: hoursAgo(20)
-    });
-    insertEvent.run({
-      ticket_id: 2,
-      type: 'note_added',
-      old_value: null,
-      new_value: 'Internal note added by Alice Walker',
-      actor_id: 1,
-      created_at: hoursAgo(20)
-    });
-    insertEntry.run({
-      ticket_id: 2,
-      type: 'reply',
-      content: 'Hi Elena, we have reproduced the issue on iOS 18.0.1. A hotfix build is currently in review.',
-      author_id: 2, // Bob
-      created_at: hoursAgo(10)
-    });
-    insertEvent.run({
-      ticket_id: 2,
-      type: 'reply_added',
-      old_value: null,
-      new_value: 'Public reply sent to customer',
-      actor_id: 2,
-      created_at: hoursAgo(10)
-    });
+    // 2. Insert tickets and initial created events
+    for (const t of tickets) {
+      await client.query(
+        `INSERT INTO tickets (id, subject, customer, description, priority, status, assignee_id, created_at, updated_at, resolved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO NOTHING`,
+        [t.id, t.subject, t.customer, t.description, t.priority, t.status, t.assignee_id, t.created_at, t.updated_at, t.resolved_at]
+      );
 
-    // Ticket 3: reply and event
-    insertEntry.run({
-      ticket_id: 3,
-      type: 'reply',
-      content: 'Hello, could you please re-upload your updated IdP XML metadata via the Admin Portal > SSO settings?',
-      author_id: 3, // Charlie
-      created_at: hoursAgo(6)
-    });
-    insertEvent.run({
-      ticket_id: 3,
-      type: 'reply_added',
-      old_value: null,
-      new_value: 'Public reply sent to customer',
-      actor_id: 3,
-      created_at: hoursAgo(6)
-    });
-    insertEvent.run({
-      ticket_id: 3,
-      type: 'status_changed',
-      old_value: 'Open',
-      new_value: 'Waiting on Customer',
-      actor_id: 3,
-      created_at: hoursAgo(6)
-    });
+      await client.query(
+        `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [t.id, 'created', null, `Created ticket #${t.id} with priority ${t.priority}`, t.assignee_id || 1, t.created_at]
+      );
+    }
 
-    // Ticket 4: resolved flow
-    insertEvent.run({
-      ticket_id: 4,
-      type: 'assignee_changed',
-      old_value: 'Unassigned',
-      new_value: 'Diana Prince',
-      actor_id: 4,
-      created_at: hoursAgo(40)
-    });
-    insertEntry.run({
-      ticket_id: 4,
-      type: 'reply',
-      content: 'CAA records have been corrected and SSL certificate successfully provisioned and verified.',
-      author_id: 4, // Diana
-      created_at: hoursAgo(8)
-    });
-    insertEvent.run({
-      ticket_id: 4,
-      type: 'reply_added',
-      old_value: null,
-      new_value: 'Public reply sent to customer',
-      actor_id: 4,
-      created_at: hoursAgo(8)
-    });
-    insertEvent.run({
-      ticket_id: 4,
-      type: 'status_changed',
-      old_value: 'In Progress',
-      new_value: 'Resolved',
-      actor_id: 4,
-      created_at: hoursAgo(8)
-    });
+    // 3. Ticket 2: entries and events
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [2, 'status_changed', 'Open', 'In Progress', 2, hoursAgo(24)]
+    );
+    await client.query(
+      `INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [2, 'note', 'Customer is an Enterprise Tier client with 50k DAU. Escalated to mobile core team.', 1, hoursAgo(20)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [2, 'note_added', null, 'Internal note added by Alice Walker', 1, hoursAgo(20)]
+    );
+    await client.query(
+      `INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [2, 'reply', 'Hi Elena, we have reproduced the issue on iOS 18.0.1. A hotfix build is currently in review.', 2, hoursAgo(10)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [2, 'reply_added', null, 'Public reply sent to customer', 2, hoursAgo(10)]
+    );
+
+    // 4. Ticket 3: reply and event
+    await client.query(
+      `INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [3, 'reply', 'Hello, could you please re-upload your updated IdP XML metadata via the Admin Portal > SSO settings?', 3, hoursAgo(6)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [3, 'reply_added', null, 'Public reply sent to customer', 3, hoursAgo(6)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [3, 'status_changed', 'Open', 'Waiting on Customer', 3, hoursAgo(6)]
+    );
+
+    // 5. Ticket 4: resolved flow
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [4, 'assignee_changed', 'Unassigned', 'Diana Prince', 4, hoursAgo(40)]
+    );
+    await client.query(
+      `INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [4, 'reply', 'CAA records have been corrected and SSL certificate successfully provisioned and verified.', 4, hoursAgo(8)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [4, 'reply_added', null, 'Public reply sent to customer', 4, hoursAgo(8)]
+    );
+    await client.query(
+      `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [4, 'status_changed', 'In Progress', 'Resolved', 4, hoursAgo(8)]
+    );
+
+    // 6. Reset Postgres sequences so subsequent auto-generated IDs do not collide
+    try {
+      await client.query("SELECT setval(pg_get_serial_sequence('agents', 'id'), coalesce(max(id), 1)) FROM agents");
+      await client.query("SELECT setval(pg_get_serial_sequence('tickets', 'id'), coalesce(max(id), 1)) FROM tickets");
+      await client.query("SELECT setval(pg_get_serial_sequence('ticket_entries', 'id'), coalesce(max(id), 1)) FROM ticket_entries");
+      await client.query("SELECT setval(pg_get_serial_sequence('ticket_events', 'id'), coalesce(max(id), 1)) FROM ticket_events");
+    } catch (seqErr) {
+      // In case of mock / in-memory DB without serial sequences
+    }
   });
 
-  seedAllTx();
   console.log(`[Seed] Seeded ${agents.length} agents and ${tickets.length} tickets successfully.`);
 }
 
 // Allow direct execution
 if (process.argv[1] && process.argv[1].endsWith('seed.js')) {
-  const db = getDb();
-  seed(db);
+  seed()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('[Seed Error]', err);
+      process.exit(1);
+    });
 }

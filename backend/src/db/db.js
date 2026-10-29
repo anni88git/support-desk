@@ -1,149 +1,122 @@
+import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 
-const require = createRequire(import.meta.url);
+const { Pool, types } = pg;
+
+// Parse TIMESTAMPTZ (1184) and TIMESTAMP (1114) as ISO 8601 strings for consistent JSON serialization
+types.setTypeParser(1184, (val) => (val ? new Date(val).toISOString() : null));
+types.setTypeParser(1114, (val) => (val ? new Date(val + 'Z').toISOString() : null));
+// Parse int8 / BIGINT (20) as integer
+types.setTypeParser(20, (val) => (val === null ? null : parseInt(val, 10)));
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Check if better-sqlite3 native binary actually exists
-const possibleBindingPaths = [
-  path.resolve(__dirname, '../../node_modules/better-sqlite3/build/Release/better_sqlite3.node'),
-  path.resolve(__dirname, '../../node_modules/better-sqlite3/Release/better_sqlite3.node')
-];
-const bindingExists = possibleBindingPaths.some(p => fs.existsSync(p));
+let defaultPool = null;
 
-let DriverClass;
-let isNodeSqlite = false;
-
-if (bindingExists) {
-  try {
-    DriverClass = require('better-sqlite3');
-  } catch (e) {
-    const { DatabaseSync } = require('node:sqlite');
-    DriverClass = DatabaseSync;
-    isNodeSqlite = true;
+export function checkDatabaseConfig() {
+  if (!process.env.DATABASE_URL) {
+    console.error('\n============================================================');
+    console.error('❌ ERROR: DATABASE_URL environment variable is not set!');
+    console.error('Please provide a valid PostgreSQL connection string.');
+    console.error('Example: DATABASE_URL=postgresql://user:password@ep-xyz.neon.tech/neondb?sslmode=require');
+    console.error('============================================================\n');
+    throw new Error('DATABASE_URL environment variable is required');
   }
-} else {
-  // Built-in SQLite (Node 22+ / 24+), zero-dependency, ultra-fast & native
-  const { DatabaseSync } = require('node:sqlite');
-  DriverClass = DatabaseSync;
-  isNodeSqlite = true;
 }
 
-function adaptDatabase(rawDb) {
-  if (!isNodeSqlite) {
-    rawDb.pragma('foreign_keys = ON');
-    return rawDb;
+export function getPoolConfig(connectionString = process.env.DATABASE_URL) {
+  if (!connectionString) {
+    checkDatabaseConfig();
   }
 
-  // Adapter for node:sqlite DatabaseSync to match better-sqlite3 API
-  rawDb.exec('PRAGMA foreign_keys = ON;');
+  const isLocalhost =
+    connectionString.includes('localhost') ||
+    connectionString.includes('127.0.0.1');
 
-  const originalPrepare = rawDb.prepare.bind(rawDb);
-  const originalExec = rawDb.exec.bind(rawDb);
-
-  const wrapper = {
-    prepare(sql) {
-      const stmt = originalPrepare(sql);
-      return {
-        run(...args) {
-          if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-            const obj = {};
-            for (const [k, v] of Object.entries(args[0])) {
-              obj[k] = v === undefined ? null : v;
-            }
-            return stmt.run(obj);
-          }
-          const cleanArgs = args.map(a => (a === undefined ? null : a));
-          return stmt.run(...cleanArgs);
-        },
-        get(...args) {
-          if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-            const obj = {};
-            for (const [k, v] of Object.entries(args[0])) {
-              obj[k] = v === undefined ? null : v;
-            }
-            return stmt.get(obj);
-          }
-          const cleanArgs = args.map(a => (a === undefined ? null : a));
-          return stmt.get(...cleanArgs);
-        },
-        all(...args) {
-          if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-            const obj = {};
-            for (const [k, v] of Object.entries(args[0])) {
-              obj[k] = v === undefined ? null : v;
-            }
-            return stmt.all(obj);
-          }
-          const cleanArgs = args.map(a => (a === undefined ? null : a));
-          return stmt.all(...cleanArgs);
-        }
-      };
-    },
-    exec(sql) {
-      return originalExec(sql);
-    },
-    pragma(pragmaStr) {
-      return originalExec(`PRAGMA ${pragmaStr};`);
-    },
-    transaction(fn) {
-      return function (...args) {
-        originalExec('BEGIN');
-        try {
-          const result = fn(...args);
-          originalExec('COMMIT');
-          return result;
-        } catch (err) {
-          originalExec('ROLLBACK');
-          throw err;
-        }
-      };
-    },
-    close() {
-      return rawDb.close();
-    }
+  const config = {
+    connectionString
   };
 
-  return wrapper;
-}
-
-let defaultDb = null;
-
-export function getDb(dbPath = process.env.DB_PATH) {
-  if (defaultDb && !dbPath) {
-    return defaultDb;
+  // Enable SSL for cloud PostgreSQL (e.g. Neon, Render, Supabase)
+  if (!isLocalhost) {
+    config.ssl = { rejectUnauthorized: false };
   }
 
-  const targetPath = dbPath || path.resolve(__dirname, '../../support_desk.db');
-  const raw = new DriverClass(targetPath);
-  const db = adaptDatabase(raw);
+  return config;
+}
 
+export function getPool(connectionString = process.env.DATABASE_URL) {
+  if (defaultPool) {
+    return defaultPool;
+  }
+
+  const config = getPoolConfig(connectionString);
+  defaultPool = new Pool(config);
+
+  defaultPool.on('error', (err) => {
+    console.error('[Postgres Pool Error]', err);
+  });
+
+  return defaultPool;
+}
+
+export function setPool(pool) {
+  defaultPool = pool;
+}
+
+export async function closePool() {
+  if (defaultPool) {
+    await defaultPool.end();
+    defaultPool = null;
+  }
+}
+
+export async function query(text, params) {
+  const pool = getPool();
+  return pool.query(text, params);
+}
+
+export async function transaction(fn) {
+  const pool = getPool();
+  return withTransaction(pool, fn);
+}
+
+export async function withTransaction(db, fn) {
+  // If db is already a dedicated client, execute directly
+  if (typeof db.connect !== 'function') {
+    return fn(db);
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function initDb(pool = getPool()) {
   const schemaPath = path.resolve(__dirname, 'schema.sql');
   const schema = fs.readFileSync(schemaPath, 'utf8');
-  db.exec(schema);
-
-  if (!dbPath) {
-    defaultDb = db;
-  }
-  return db;
+  await pool.query(schema);
 }
 
-export function createInMemoryDb() {
-  const raw = new DriverClass(':memory:');
-  const db = adaptDatabase(raw);
-
-  const schemaPath = path.resolve(__dirname, 'schema.sql');
-  const schema = fs.readFileSync(schemaPath, 'utf8');
-  db.exec(schema);
-  return db;
-}
-
-export function closeDb() {
-  if (defaultDb) {
-    defaultDb.close();
-    defaultDb = null;
-  }
-}
+export default {
+  getPool,
+  setPool,
+  closePool,
+  query,
+  transaction,
+  withTransaction,
+  initDb,
+  checkDatabaseConfig
+};

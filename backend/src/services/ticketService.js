@@ -1,30 +1,26 @@
 import { AppError } from '../middleware/errorHandler.js';
 import { VALID_PRIORITIES, VALID_STATUSES, VALID_ENTRY_TYPES, parsePositiveInt } from '../middleware/validate.js';
-
-// Helper to calculate overdue cutoff (24 hours ago)
-function getOverdueCutoff() {
-  return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-}
+import { withTransaction } from '../db/db.js';
 
 // Helper to check if an agent exists
-function findAgent(db, agentId) {
+async function findAgent(db, agentId) {
   if (agentId === null || agentId === undefined) return null;
-  return db.prepare('SELECT id, name, email FROM agents WHERE id = ?').get(agentId) || null;
+  const res = await db.query('SELECT id, name, email FROM agents WHERE id = $1', [agentId]);
+  return res.rows[0] || null;
 }
 
 export const ticketService = {
   /**
    * List tickets with filtering, search, and sorting.
    */
-  listTickets(db, query = {}) {
-    const cutoff = getOverdueCutoff();
+  async listTickets(db, query = {}) {
     const whereClauses = [];
-    const params = [cutoff];
+    const params = [];
 
-    // Search: case-insensitive over subject and customer
+    // Search: case-insensitive over subject and customer using ILIKE
     if (query.search && query.search.trim()) {
-      const term = `%${query.search.trim().toLowerCase()}%`;
-      whereClauses.push('(LOWER(t.subject) LIKE ? OR LOWER(t.customer) LIKE ?)');
+      const term = `%${query.search.trim()}%`;
+      whereClauses.push(`(t.subject ILIKE $${params.length + 1} OR t.customer ILIKE $${params.length + 2})`);
       params.push(term, term);
     }
 
@@ -35,7 +31,7 @@ export const ticketService = {
           status: `Must be one of: ${VALID_STATUSES.join(', ')}`
         });
       }
-      whereClauses.push('t.status = ?');
+      whereClauses.push(`t.status = $${params.length + 1}`);
       params.push(query.status);
     }
 
@@ -46,7 +42,7 @@ export const ticketService = {
           priority: `Must be one of: ${VALID_PRIORITIES.join(', ')}`
         });
       }
-      whereClauses.push('t.priority = ?');
+      whereClauses.push(`t.priority = $${params.length + 1}`);
       params.push(query.priority);
     }
 
@@ -56,7 +52,7 @@ export const ticketService = {
         whereClauses.push('t.assignee_id IS NULL');
       } else {
         const agentId = parsePositiveInt(query.assignee, 'assignee');
-        whereClauses.push('t.assignee_id = ?');
+        whereClauses.push(`t.assignee_id = $${params.length + 1}`);
         params.push(agentId);
       }
     }
@@ -86,7 +82,7 @@ export const ticketService = {
       const limit = Math.max(1, parseInt(query.limit, 10) || 50);
       const page = Math.max(1, parseInt(query.page, 10) || 1);
       const offset = (page - 1) * limit;
-      paginationSql = `LIMIT ? OFFSET ?`;
+      paginationSql = `LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
       params.push(limit, offset);
     }
 
@@ -105,8 +101,8 @@ export const ticketService = {
         t.updated_at,
         t.resolved_at,
         CASE
-          WHEN t.status != 'Resolved' AND t.created_at < ? THEN 1
-          ELSE 0
+          WHEN t.status != 'Resolved' AND t.created_at < (NOW() - INTERVAL '24 hours') THEN true
+          ELSE false
         END AS is_overdue
       FROM tickets t
       LEFT JOIN agents a ON t.assignee_id = a.id
@@ -115,8 +111,8 @@ export const ticketService = {
       ${paginationSql}
     `;
 
-    const rows = db.prepare(sql).all(...params);
-    return rows.map(row => ({
+    const res = await db.query(sql, params);
+    return res.rows.map((row) => ({
       ...row,
       is_overdue: Boolean(row.is_overdue)
     }));
@@ -125,9 +121,8 @@ export const ticketService = {
   /**
    * Get ticket by ID with entries and events in chronological order.
    */
-  getTicketById(db, id) {
+  async getTicketById(db, id) {
     const ticketId = parsePositiveInt(id, 'ticket id');
-    const cutoff = getOverdueCutoff();
 
     const ticketSql = `
       SELECT
@@ -144,15 +139,16 @@ export const ticketService = {
         t.updated_at,
         t.resolved_at,
         CASE
-          WHEN t.status != 'Resolved' AND t.created_at < ? THEN 1
-          ELSE 0
+          WHEN t.status != 'Resolved' AND t.created_at < (NOW() - INTERVAL '24 hours') THEN true
+          ELSE false
         END AS is_overdue
       FROM tickets t
       LEFT JOIN agents a ON t.assignee_id = a.id
-      WHERE t.id = ?
+      WHERE t.id = $1
     `;
 
-    const ticket = db.prepare(ticketSql).get(cutoff, ticketId);
+    const ticketRes = await db.query(ticketSql, [ticketId]);
+    const ticket = ticketRes.rows[0];
     if (!ticket) {
       throw new AppError(`Ticket #${ticketId} not found`, 404);
     }
@@ -170,10 +166,10 @@ export const ticketService = {
         e.created_at
       FROM ticket_entries e
       JOIN agents a ON e.author_id = a.id
-      WHERE e.ticket_id = ?
+      WHERE e.ticket_id = $1
       ORDER BY e.created_at ASC, e.id ASC
     `;
-    const entries = db.prepare(entriesSql).all(ticketId);
+    const entriesRes = await db.query(entriesSql, [ticketId]);
 
     // Chronological events (ASC)
     const eventsSql = `
@@ -188,23 +184,23 @@ export const ticketService = {
         ev.created_at
       FROM ticket_events ev
       LEFT JOIN agents a ON ev.actor_id = a.id
-      WHERE ev.ticket_id = ?
+      WHERE ev.ticket_id = $1
       ORDER BY ev.created_at ASC, ev.id ASC
     `;
-    const events = db.prepare(eventsSql).all(ticketId);
+    const eventsRes = await db.query(eventsSql, [ticketId]);
 
     return {
       ...ticket,
       is_overdue: Boolean(ticket.is_overdue),
-      entries,
-      events
+      entries: entriesRes.rows,
+      events: eventsRes.rows
     };
   },
 
   /**
    * Create a new ticket and log 'created' event inside a single transaction.
    */
-  createTicket(db, body) {
+  async createTicket(db, body) {
     if (!body || typeof body !== 'object') {
       throw new AppError('Request body must be a JSON object', 400);
     }
@@ -245,7 +241,7 @@ export const ticketService = {
     let assigneeId = null;
     if (body.assignee_id !== undefined && body.assignee_id !== null && body.assignee_id !== '') {
       assigneeId = parsePositiveInt(body.assignee_id, 'assignee_id');
-      const agent = findAgent(db, assigneeId);
+      const agent = await findAgent(db, assigneeId);
       if (!agent) {
         throw new AppError('Assignee agent not found', 404, {
           assignee_id: `Agent with id ${assigneeId} does not exist`
@@ -260,59 +256,39 @@ export const ticketService = {
     const now = new Date().toISOString();
     const resolvedAt = status === 'Resolved' ? now : null;
 
-    const insertTicket = db.prepare(`
-      INSERT INTO tickets (subject, customer, description, priority, status, assignee_id, created_at, updated_at, resolved_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const insertEvent = db.prepare(`
-      INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
-    let newTicketId;
-    const createTx = db.transaction(() => {
-      const res = insertTicket.run(
-        subject,
-        customer,
-        description,
-        priority,
-        status,
-        assigneeId,
-        now,
-        now,
-        resolvedAt
+    return withTransaction(db, async (client) => {
+      const insertRes = await client.query(
+        `INSERT INTO tickets (subject, customer, description, priority, status, assignee_id, created_at, updated_at, resolved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [subject, customer, description, priority, status, assigneeId, now, now, resolvedAt]
       );
-      newTicketId = Number(res.lastInsertRowid);
+      const newTicketId = insertRes.rows[0].id;
 
-      insertEvent.run(
-        newTicketId,
-        'created',
-        null,
-        `Created ticket with priority ${priority}`,
-        assigneeId,
-        now
+      await client.query(
+        `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [newTicketId, 'created', null, `Created ticket with priority ${priority}`, assigneeId, now]
       );
+
+      return this.getTicketById(client, newTicketId);
     });
-
-    createTx();
-    return this.getTicketById(db, newTicketId);
   },
 
   /**
    * Partially update a ticket and record events for changed fields in a single transaction.
    */
-  updateTicket(db, id, body) {
+  async updateTicket(db, id, body) {
     const ticketId = parsePositiveInt(id, 'ticket id');
 
     if (!body || typeof body !== 'object') {
       throw new AppError('Request body must be a JSON object', 400);
     }
 
-    const current = this.getTicketById(db, ticketId);
+    const current = await this.getTicketById(db, ticketId);
     const details = {};
     const allowedKeys = ['subject', 'customer', 'description', 'priority', 'status', 'assignee_id'];
-    const providedKeys = Object.keys(body).filter(k => allowedKeys.includes(k));
+    const providedKeys = Object.keys(body).filter((k) => allowedKeys.includes(k));
 
     if (providedKeys.length === 0) {
       throw new AppError('At least one field must be provided for update', 400);
@@ -380,7 +356,7 @@ export const ticketService = {
         newAssigneeName = 'Unassigned';
       } else {
         const parsed = parsePositiveInt(body.assignee_id, 'assignee_id');
-        const agent = findAgent(db, parsed);
+        const agent = await findAgent(db, parsed);
         if (!agent) {
           throw new AppError('Assignee agent not found', 404, {
             assignee_id: `Agent with id ${parsed} does not exist`
@@ -447,54 +423,34 @@ export const ticketService = {
       }
     }
 
-    const updateTicketSql = db.prepare(`
-      UPDATE tickets
-      SET subject = ?, customer = ?, description = ?, priority = ?, status = ?, assignee_id = ?, updated_at = ?, resolved_at = ?
-      WHERE id = ?
-    `);
-
-    const insertEventSql = db.prepare(`
-      INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
-
-    const patchTx = db.transaction(() => {
-      updateTicketSql.run(
-        newSubject,
-        newCustomer,
-        newDescription,
-        newPriority,
-        newStatus,
-        newAssigneeId,
-        now,
-        resolvedAt,
-        ticketId
+    return withTransaction(db, async (client) => {
+      await client.query(
+        `UPDATE tickets
+         SET subject = $1, customer = $2, description = $3, priority = $4, status = $5, assignee_id = $6, updated_at = $7, resolved_at = $8
+         WHERE id = $9`,
+        [newSubject, newCustomer, newDescription, newPriority, newStatus, newAssigneeId, now, resolvedAt, ticketId]
       );
 
       for (const ev of eventsToCreate) {
-        insertEventSql.run(
-          ticketId,
-          ev.type,
-          ev.old_value,
-          ev.new_value,
-          newAssigneeId || current.assignee_id || null,
-          now
+        await client.query(
+          `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [ticketId, ev.type, ev.old_value, ev.new_value, newAssigneeId || current.assignee_id || null, now]
         );
       }
-    });
 
-    patchTx();
-    return this.getTicketById(db, ticketId);
+      return this.getTicketById(client, ticketId);
+    });
   },
 
   /**
    * Add a reply or note entry to a ticket inside a single transaction.
    */
-  createTicketEntry(db, id, body) {
+  async createTicketEntry(db, id, body) {
     const ticketId = parsePositiveInt(id, 'ticket id');
 
     // Verify ticket exists
-    this.getTicketById(db, ticketId);
+    await this.getTicketById(db, ticketId);
 
     if (!body || typeof body !== 'object') {
       throw new AppError('Request body must be a JSON object', 400);
@@ -523,7 +479,7 @@ export const ticketService = {
     }
 
     const authorId = parsePositiveInt(body.author_id, 'author_id');
-    const author = findAgent(db, authorId);
+    const author = await findAgent(db, authorId);
     if (!author) {
       throw new AppError('Author agent not found', 404, {
         author_id: `Agent with id ${authorId} does not exist`
@@ -534,71 +490,62 @@ export const ticketService = {
     const eventType = type === 'reply' ? 'reply_added' : 'note_added';
     const eventSummary = type === 'reply' ? 'Public reply added' : 'Internal note added';
 
-    const insertEntry = db.prepare(`
-      INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
+    return withTransaction(db, async (client) => {
+      const insertRes = await client.query(
+        `INSERT INTO ticket_entries (ticket_id, type, content, author_id, created_at)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+        [ticketId, type, content, authorId, now]
+      );
+      const newEntryId = insertRes.rows[0].id;
 
-    const bumpTicket = db.prepare(`
-      UPDATE tickets
-      SET updated_at = ?
-      WHERE id = ?
-    `);
+      await client.query(
+        `UPDATE tickets
+         SET updated_at = $1
+         WHERE id = $2`,
+        [now, ticketId]
+      );
 
-    const insertEvent = db.prepare(`
-      INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+      await client.query(
+        `INSERT INTO ticket_events (ticket_id, type, old_value, new_value, actor_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [ticketId, eventType, null, eventSummary, authorId, now]
+      );
 
-    let newEntryId;
-    const entryTx = db.transaction(() => {
-      const res = insertEntry.run(ticketId, type, content, authorId, now);
-      newEntryId = Number(res.lastInsertRowid);
-      bumpTicket.run(now, ticketId);
-      insertEvent.run(ticketId, eventType, null, eventSummary, authorId, now);
+      const entryRes = await client.query(
+        `SELECT
+           e.id,
+           e.ticket_id,
+           e.type,
+           e.content,
+           e.author_id,
+           a.name AS author_name,
+           a.email AS author_email,
+           e.created_at
+         FROM ticket_entries e
+         JOIN agents a ON e.author_id = a.id
+         WHERE e.id = $1`,
+        [newEntryId]
+      );
+
+      return entryRes.rows[0];
     });
-
-    entryTx();
-
-    const createdEntry = db.prepare(`
-      SELECT
-        e.id,
-        e.ticket_id,
-        e.type,
-        e.content,
-        e.author_id,
-        a.name AS author_name,
-        a.email AS author_email,
-        e.created_at
-      FROM ticket_entries e
-      JOIN agents a ON e.author_id = a.id
-      WHERE e.id = ?
-    `).get(newEntryId);
-
-    return createdEntry;
   },
 
   /**
    * Delete a ticket, its entries, and events in one transaction.
    * Throws 404 if ticket doesn't exist, 400 if id is invalid.
    */
-  deleteTicket(db, id) {
+  async deleteTicket(db, id) {
     const ticketId = parsePositiveInt(id, 'ticket id');
 
     // Throws 404 if not found
-    this.getTicketById(db, ticketId);
+    await this.getTicketById(db, ticketId);
 
-    const deleteEntries = db.prepare('DELETE FROM ticket_entries WHERE ticket_id = ?');
-    const deleteEvents = db.prepare('DELETE FROM ticket_events WHERE ticket_id = ?');
-    const deleteTicket = db.prepare('DELETE FROM tickets WHERE id = ?');
-
-    const deleteTx = db.transaction(() => {
-      deleteEntries.run(ticketId);
-      deleteEvents.run(ticketId);
-      deleteTicket.run(ticketId);
+    return withTransaction(db, async (client) => {
+      await client.query('DELETE FROM ticket_entries WHERE ticket_id = $1', [ticketId]);
+      await client.query('DELETE FROM ticket_events WHERE ticket_id = $1', [ticketId]);
+      await client.query('DELETE FROM tickets WHERE id = $1', [ticketId]);
     });
-
-    deleteTx();
   }
 };
-
