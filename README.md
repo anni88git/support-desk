@@ -1,6 +1,6 @@
 # Support Desk System
 
-A lightweight, robust customer-support ticketing application built with Node.js, Express, SQLite, React, and Vite. Designed with an intentional focus on reliability, clear business domain separation, transactional data integrity, and a clean, minimal user experience.
+A lightweight, robust customer-support ticketing application built with Node.js, Express, PostgreSQL, React, and Vite. Designed with an intentional focus on reliability, clear business domain separation, transactional data integrity, and a clean, minimal user experience.
 
 ---
 
@@ -9,10 +9,11 @@ A lightweight, robust customer-support ticketing application built with Node.js,
 - Full Ticket Lifecycle (CRUD): Create tickets, read detailed threads with full history, partially update ticket attributes, and permanently delete tickets with cascaded cleanup.
 - Real-Time Dashboard: Top metrics cards reporting `Total`, `Open`, `In Progress`, `Resolved`, `Urgent`, and `Overdue` tickets, updating instantly on status transitions and deletions.
 - Search & Multi-Dimensional Filtering: Search subject and customer fields (debounced 300ms) combined with multi-select dropdown filters for status, priority, and assignee (including "Unassigned").
-- Customizable Sorting: Sort tickets by recently updated or by priority hierarchy (`Urgent` > `High` > `Medium` > `Low`).
+- Customizable Sorting: Sort tickets by recently updated or by priority hierarchy (`Urgent` > `High` > `Medium` > `Low`) with `id` as tiebreaker.
 - Conversational Threads: Distinct public customer `reply` entries (with a crisp light-blue border) and private internal agent `note` entries (with a warm dashed border).
 - Audit Activity Timeline: Immutable event stream tracking status updates, priority escalations, assignee changes, and communications with before-and-after values.
 - Dynamic Overdue Tracking: Real-time computed overdue tag (tickets older than 24 hours that are not yet Resolved).
+- Persistent Cloud Storage: Backed by PostgreSQL (Neon Serverless Postgres) for full data persistence across cloud deployments and server restarts.
 
 ---
 
@@ -20,9 +21,7 @@ A lightweight, robust customer-support ticketing application built with Node.js,
 
 - Node.js: Version >=22.5 (tested on Node v24.13.0).
 - npm: Version >=10.x.
-
-### Why `node:sqlite`?
-On modern Node versions (especially Node 24 on Windows), native C++ bindings such as `better-sqlite3` frequently encounter missing precompiled ABI binaries (e.g. Node ABI 137) unless full Visual Studio C++ build tools are installed. To guarantee zero-friction setup on any developer machine and cloud provider, the backend features a resilient SQLite adapter that automatically leverages Node's built-in `node:sqlite` module (`DatabaseSync`) when native compiled addons are unavailable.
+- PostgreSQL database: e.g. a free serverless instance on [Neon](https://neon.tech).
 
 ---
 
@@ -38,7 +37,25 @@ npm run install:all
 
 ---
 
-### 2. Start the Development Servers
+### 2. Configure Environment Variables
+
+Create `backend/.env` from `backend/.env.example`:
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` to provide your PostgreSQL connection string:
+
+```env
+PORT=4000
+CLIENT_ORIGIN=http://localhost:3000
+DATABASE_URL=postgresql://user:password@ep-xyz.neon.tech/neondb?sslmode=require
+```
+
+---
+
+### 3. Start the Development Servers
 
 Open two terminal windows:
 
@@ -51,6 +68,8 @@ npm run dev:backend
 cd backend
 npm run dev
 ```
+On startup, the backend automatically connects to PostgreSQL, creates all tables if they don't exist, and seeds demo data if the database is unpopulated.
+
 The backend server starts on: `http://localhost:4000`  
 Opening `http://localhost:4000/` returns a friendly JSON directory of all available API endpoints.
 
@@ -77,22 +96,27 @@ Configured in `backend/.env.example`:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `PORT` | `4000` | Port for the Express backend server (provided automatically by Render). |
+| `PORT` | `4000` | Port for the Express backend server (provided automatically by Render in production). |
 | `CLIENT_ORIGIN` | `http://localhost:3000` | Allowed origin(s) for CORS. Supports multiple comma-separated URLs without trailing slashes. |
-| `DB_PATH` | `./support_desk.db` | Absolute or relative file path to the SQLite database file. |
+| `DATABASE_URL` | *Required* | PostgreSQL connection string (e.g. from Neon). SSL is enabled automatically for remote hosts. |
+| `TEST_DATABASE_URL` | *Empty* | Dedicated separate PostgreSQL connection string for automated tests (must not match `DATABASE_URL`). |
 
 ### Frontend (`frontend/.env`)
 Configured in `frontend/.env.example`:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `VITE_API_URL` | Unset (uses `/api`) | Base backend API URL. Leave unset in local dev to use Vite proxy; set to `https://your-api.onrender.com/api` on Vercel. |
+| `VITE_API_URL` | Unset (uses `/api`) | Base backend API URL. Leave unset in local dev to use Vite proxy; set to `https://your-backend.onrender.com/api` on Vercel. |
 
 ---
 
 ## Deployment Guide
 
 The project is structured for independent split deployment:
+
+### Database on Neon
+1. Create a free PostgreSQL project on [Neon](https://neon.tech).
+2. Copy your connection string from the Neon dashboard (ensure `sslmode=require`).
 
 ### Frontend on Vercel
 1. Import your GitHub repository into Vercel.
@@ -111,35 +135,26 @@ The project is structured for independent split deployment:
 4. Build Command: `npm install`.
 5. Start Command: `npm start` (or `node src/index.js`).
 6. Environment Variables:
+   - `DATABASE_URL`: `postgresql://user:password@ep-xyz.neon.tech/neondb?sslmode=require`
    - `CLIENT_ORIGIN`: `https://your-frontend.vercel.app` (your Vercel app domain, no trailing slash).
-   - `NODE_VERSION`: `22.5.0` (or `24`).
+   - `NODE_VERSION`: `24`.
    - `PORT`: (Provided automatically by Render).
 
 ---
 
 ## Database Architecture & Management
 
-- File Location: The SQLite database file is stored at `backend/support_desk.db`.
-- Automatic Initialization: On boot, `backend/src/db/db.js` automatically creates and applies `backend/src/db/schema.sql` if tables do not exist.
-- Enforced Foreign Keys: All connections enforce foreign key integrity via `PRAGMA foreign_keys = ON;`.
+- Managed Database: PostgreSQL (compatible with Neon, Supabase, AWS RDS, Render PostgreSQL).
+- Data Persistence: Fully persistent; data survives instance restarts, scaling, and redeployments.
+- Automatic Initialization: On boot, `backend/src/db/db.js` automatically creates and applies `backend/src/db/schema.sql` via `CREATE TABLE IF NOT EXISTS`.
+- Enforced Foreign Keys: Relational integrity with `ON DELETE CASCADE` for entries and events, and `ON DELETE SET NULL` for ticket assignees.
 - Idempotent Seeding: `backend/src/db/seed.js` runs automatically on startup. If the `tickets` table is empty, it populates 4 agents and 12 sample tickets covering all statuses, priorities, overdue tickets, conversation entries, and audit events. If tickets already exist, seeding is safely skipped.
-- Resetting the Database:
-  ```bash
-  # 1. Stop the backend server
-  # 2. Delete the database file:
-  # Windows (PowerShell):
-  Remove-Item backend/support_desk.db
-  # macOS / Linux:
-  rm backend/support_desk.db
-  # 3. Restart the backend:
-  npm run dev:backend
-  ```
 - Inspect Database (Read-Only Script):
   Run from root or inside `backend/`:
   ```bash
   npm run db:inspect
   ```
-  Opens `backend/support_desk.db` in read-only mode and prints formatted tables of:
+  Connects to PostgreSQL in read-only mode and prints formatted tables of:
   - Table row counts (`agents`, `tickets`, `ticket_entries`, `ticket_events`)
   - All agents
   - All tickets with timestamps and status
@@ -170,7 +185,7 @@ All responses are formatted as JSON. Errors return `{ "error": "Message", "detai
 ## Business Rules
 
 1. Computed Overdue:
-   - A ticket is considered `is_overdue = true` if and only if `status != 'Resolved'` AND `created_at < 24 hours ago`.
+   - A ticket is considered `is_overdue = true` if and only if `status != 'Resolved'` AND `created_at < now() - interval '24 hours'`.
    - Once a ticket is marked `Resolved`, `is_overdue` immediately evaluates to `false`.
    - Computed dynamically at query time using SQL `CASE` statements to avoid database sync drift.
 2. Dashboard Metric Counts:
@@ -178,7 +193,7 @@ All responses are formatted as JSON. Errors return `{ "error": "Message", "detai
    - `open`: Count of tickets with `status = 'Open'`.
    - `in_progress`: Count of tickets with `status = 'In Progress'`.
    - `resolved`: Count of tickets with `status = 'Resolved'`.
-   - `urgent`: Count of tickets with `priority = 'Urgent'`.
+   - `urgent`: Count of tickets with `priority = 'Urgent' AND status != 'Resolved'`.
    - `overdue`: Count of unresolved tickets created more than 24 hours ago.
 3. Audit Event Logging:
    - Events are recorded only when values actually change on PATCH operations.
@@ -193,7 +208,7 @@ All responses are formatted as JSON. Errors return `{ "error": "Message", "detai
 
 ## Running Automated Tests
 
-Backend tests run against an isolated in-memory SQLite database using Node's built-in test runner (`node:test` + `node:assert/strict`) and `supertest`:
+Backend tests run with Node's built-in test runner (`node:test --test-concurrency=1` + `node:assert/strict`) and `supertest`:
 
 ```bash
 # From project root:
@@ -204,15 +219,7 @@ cd backend
 npm test
 ```
 
-Test coverage includes:
-- Ticket creation (201) and field validation errors (400)
-- Status & priority enum constraints
-- PATCH delta detection (events emitted only on actual changes)
-- Overdue threshold calculation (> 24h unresolved)
-- Dashboard metric accuracy
-- Reply vs internal note entry typing and `updated_at` bump
-- Combined multi-filter searching & priority hierarchy sorting
-- Ticket deletion (204, cascaded entries/events removal, 404 verification, dashboard count drop)
+> **Note**: Automated tests require a dedicated `TEST_DATABASE_URL` in `backend/.env`. If `TEST_DATABASE_URL` is empty or equal to `DATABASE_URL`, tests automatically skip with a clear warning to protect live production data.
 
 ---
 
@@ -221,20 +228,20 @@ Test coverage includes:
 ```text
 support-desk/
 ├── package.json                 # Root scripts (install:all, dev:backend, dev:frontend, test)
-├── .gitignore                   # Ignores node_modules, dist, .db files, .env, logs
+├── .gitignore                   # Ignores node_modules, dist, .env, logs
 ├── README.md                    # Project documentation and deployment guide
 ├── NOTES.md                     # Assessment notes, decisions, architecture & self-reflection
 ├── backend/
-│   ├── .env.example             # Example environment file (PORT, CLIENT_ORIGIN, DB_PATH)
-│   ├── package.json             # Backend dependencies & test script ("node --test")
+│   ├── .env.example             # Example environment file (PORT, CLIENT_ORIGIN, DATABASE_URL)
+│   ├── package.json             # Backend dependencies (pg, express, cors, dotenv)
 │   ├── scripts/
-│   │   └── inspect-db.js        # Read-only console.table SQLite database inspection script
+│   │   └── inspect-db.js        # Read-only console.table PostgreSQL inspection script
 │   ├── src/
 │   │   ├── app.js               # Express application setup, CORS, routes & middleware
-│   │   ├── index.js             # Backend entry point (starts listener on PORT)
+│   │   ├── index.js             # Backend entry point (schema init, seed, listens on PORT)
 │   │   ├── db/
-│   │   │   ├── schema.sql       # DDL definitions (agents, tickets, entries, events)
-│   │   │   ├── db.js            # SQLite connection wrapper & in-memory test factory
+│   │   │   ├── schema.sql       # PostgreSQL DDL definitions (agents, tickets, entries, events)
+│   │   │   ├── db.js            # PostgreSQL Pool connection wrapper & transaction helper
 │   │   │   └── seed.js          # Idempotent seed data generator
 │   │   ├── routes/
 │   │   │   ├── agents.js        # GET /api/agents
@@ -246,7 +253,7 @@ support-desk/
 │   │       ├── validate.js      # Input validators & domain enums
 │   │       └── errorHandler.js  # Centralized error handler ({ error, details })
 │   └── tests/
-│       └── tickets.test.js      # 19 automated tests using node:test & supertest
+│       └── tickets.test.js      # Automated tests using node:test & supertest
 └── frontend/
     ├── package.json             # Frontend dependencies (React 18, Vite, react-router-dom)
     ├── vite.config.js           # Vite config with /api proxy to http://localhost:4000

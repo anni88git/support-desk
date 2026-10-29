@@ -11,16 +11,16 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "seed": "node src/db/seed.js",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "db:inspect": "node scripts/inspect-db.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "pg": "^8.23.1"
   },
   "devDependencies": {
-    "pg-mem": "^3.0.14",
     "supertest": "^7.0.0"
   }
 }
